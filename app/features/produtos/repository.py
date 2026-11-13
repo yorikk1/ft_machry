@@ -1,28 +1,19 @@
-from contextlib import contextmanager
-
+from app.utils.paginacao import PaginacaoQuery, paginar
+from app.utils.interfaces.repository import RepositorioBase
 from db.database_config import db
 
 from .models import GrupoProduto, Produto
 
 
-class ProdutoRepository:
-    @contextmanager
-    def transacao(self):
-        try:
-            yield db.session
-        except Exception:
-            db.session.rollback()
-            raise
-        else:
-            db.session.commit()
-
-    def listar_ativos(self) -> list[Produto]:
-        return (
-            db.session.query(Produto)
-            .filter(Produto.ativo == 1)
-            .order_by(Produto.nome)
-            .all()
+class ProdutoRepository(RepositorioBase):
+    def listar_ativos(self, paginacao: PaginacaoQuery):
+        return paginar(
+            db.select(Produto).where(Produto.ativo == 1).order_by(Produto.nome, Produto.id),
+            paginacao,
         )
+
+    def ativos(self) -> list[Produto]:
+        return db.session.query(Produto).filter_by(ativo=1).all()
 
     def obter_ativo(self, produto_id: int) -> Produto | None:
         return db.session.query(Produto).filter_by(id=produto_id, ativo=1).first()

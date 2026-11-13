@@ -1,9 +1,10 @@
 from flask import Blueprint
 
-from app.utils.parsing import entrada
+from app.utils.paginacao import PaginacaoQuery, resposta_paginada
+from app.utils.parsing import consulta, entrada
 
 from .repository import FichaTecnicaRepository
-from .schemas import FaseCatalogoOut, FichaTecnicaInput
+from .schemas import FaseCatalogoOut, FichaLoteInput, FichaTecnicaInput
 from .services import FichaTecnicaService
 
 bp = Blueprint("fichas_tecnicas", __name__)
@@ -48,15 +49,14 @@ def _serializar(ficha):
 
 @bp.get("/fases")
 def listar_fases():
-    return [
-        FaseCatalogoOut.model_validate(fase).model_dump()
-        for fase in get_service().listar_fases()
-    ]
+    return resposta_paginada(
+        get_service().listar_fases(consulta(PaginacaoQuery)), FaseCatalogoOut
+    )
 
 
 @bp.get("")
 def listar():
-    return [_serializar(ficha) for ficha in get_service().listar()]
+    return resposta_paginada(get_service().listar(consulta(PaginacaoQuery)), _serializar)
 
 
 @bp.get("/<int:ficha_id>")
@@ -67,6 +67,17 @@ def detalhar(ficha_id: int):
 @bp.post("")
 def criar():
     return _serializar(get_service().criar(entrada(FichaTecnicaInput))), 201
+
+
+@bp.post("/lote")
+def criar_lote():
+    fichas, fases_criadas, ignoradas = get_service().criar_lote(entrada(FichaLoteInput))
+    return {
+        "items": [_serializar(ficha) for ficha in fichas],
+        "total": len(fichas),
+        "fases_criadas": fases_criadas,
+        "ignoradas": ignoradas,
+    }, 201
 
 
 @bp.put("/<int:ficha_id>")

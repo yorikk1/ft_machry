@@ -5,6 +5,7 @@ Controller puro: delega a leitura para o service e serializa com schemas.py
 from flask import Blueprint
 
 from app.utils.errors import RegistroNaoEncontrado
+from app.utils.paginacao import PaginacaoQuery, resposta_paginada
 from app.utils.parsing import consulta, entrada
 
 from . import schemas
@@ -21,23 +22,23 @@ def get_service() -> EstoqueService:
 @bp.get("/inventario")
 def inventario():
     filtro = consulta(schemas.InventarioQuery)
-    itens = get_service().listar_inventario(filtro.produto_id, filtro.lote_id)
-    return [schemas.ItemInventarioOut.model_validate(i).model_dump() for i in itens]
+    pagina = get_service().listar_inventario(filtro, filtro.produto_id, filtro.lote_id)
+    return resposta_paginada(pagina, schemas.ItemInventarioOut)
 
 
 @bp.get("/movimentacoes")
 def movimentacoes():
     filtro = consulta(schemas.MovimentacaoQuery)
-    itens = get_service().listar_movimentacoes(
-        filtro.limite, filtro.lote_id, filtro.usuario_id, filtro.tipo
+    pagina = get_service().listar_movimentacoes(
+        filtro, filtro.lote_id, filtro.usuario_id, filtro.tipo
     )
-    return [schemas.MovimentacaoOut.model_validate(i).model_dump() for i in itens]
+    return resposta_paginada(pagina, schemas.MovimentacaoOut)
 
 
 @bp.get("/localizacoes")
 def listar_localizacoes():
-    itens = get_service().listar_localizacoes()
-    return [schemas.LocalizacaoOut.model_validate(i).model_dump() for i in itens]
+    pagina = get_service().listar_localizacoes(consulta(PaginacaoQuery))
+    return resposta_paginada(pagina, schemas.LocalizacaoOut)
 
 
 @bp.post("/localizacoes")
@@ -63,8 +64,8 @@ def remover_localizacao(loc_id):
 @bp.get("/lotes")
 def listar_lotes():
     filtro = consulta(schemas.LoteQuery)
-    itens = get_service().listar_lotes(filtro.produto_id, filtro.localizacao_id)
-    return [schemas.LoteListadoOut.model_validate(i).model_dump() for i in itens]
+    pagina = get_service().listar_lotes(filtro, filtro.produto_id, filtro.localizacao_id)
+    return resposta_paginada(pagina, schemas.LoteListadoOut)
 
 
 @bp.get("/lotes/<int:lote_id>")
@@ -87,6 +88,39 @@ def atualizar_lote(lote_id):
     dados = entrada(schemas.LoteUpdate)
     atualizado = get_service().atualizar_lote(lote_id, dados)
     return schemas.LoteOut.model_validate(atualizado).model_dump()
+
+
+@bp.get("/lotes/<int:lote_id>/itens")
+def listar_itens(lote_id):
+    filtro = consulta(schemas.ItemLoteQuery)
+    pagina = get_service().listar_itens(lote_id, filtro)
+    return resposta_paginada(pagina, schemas.ItemLoteOut)
+
+
+@bp.post("/lotes/<int:lote_id>/itens")
+def adicionar_itens(lote_id):
+    dados = entrada(schemas.ItensLoteCreate)
+    itens = get_service().adicionar_itens(lote_id, dados)
+    return [schemas.ItemLoteOut.model_validate(item).model_dump() for item in itens], 201
+
+
+@bp.get("/itens/<int:item_id>")
+def detalhar_item(item_id):
+    item = get_service().obter_item(item_id)
+    return schemas.ItemLoteOut.model_validate(item).model_dump()
+
+
+@bp.put("/itens/<int:item_id>")
+def atualizar_item(item_id):
+    dados = entrada(schemas.ItemLoteUpdate)
+    item = get_service().atualizar_item(item_id, dados)
+    return schemas.ItemLoteOut.model_validate(item).model_dump()
+
+
+@bp.post("/itens/<int:item_id>/abrir")
+def abrir_item(item_id):
+    item = get_service().abrir_item(item_id)
+    return schemas.ItemLoteOut.model_validate(item).model_dump()
 
 
 @bp.post("/movimentacoes")

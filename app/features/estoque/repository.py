@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
 from datetime import date
 from typing import Optional
 
@@ -9,30 +8,25 @@ from sqlalchemy import text
 from db.database_config import db
 
 from app.features.usuarios.models import Usuario
+from app.utils.constantes import Constantes
+from app.utils.paginacao import PaginacaoQuery, paginar, paginar_sql
+from app.utils.interfaces.repository import RepositorioBase
 
-from .models import Localizacao, Lote, MovimentacaoEstoque, Produto, ProdutoTransformacao
-
-_TIPOS_SOMAM_NA_ORIGEM = {"ENTRADA", "PRODUCAO", "AJUSTE_ENTRADA"}
-_TIPOS_SUBTRAEM_DA_ORIGEM = {"SAIDA", "CONSUMO_PRODUCAO", "TRANSFERENCIA",
-                             "TRANSFORMACAO", "AJUSTE_SAIDA"}
-_TIPOS_COM_DESTINO = {"TRANSFERENCIA", "TRANSFORMACAO"}
+from .models import (
+    ItemLote, Localizacao, Lote, MovimentacaoEstoque, MovimentacaoItem, Produto,
+    ProdutoTransformacao,
+)
 
 
-class EstoqueRepository:
-
-    @contextmanager
-    def transacao(self):
-        try:
-            yield db.session
-        except Exception:
-            db.session.rollback()
-            raise
-        else:
-            db.session.commit()
-
+class EstoqueRepository(RepositorioBase):
     # -- inventário / movimentações -----------------------------------------
 
-    def listar_inventario(self, produto_id: Optional[int] = None, lote_id: Optional[int] = None):
+    def listar_inventario(
+        self,
+        paginacao: PaginacaoQuery,
+        produto_id: Optional[int] = None,
+        lote_id: Optional[int] = None,
+    ):
         sql = "SELECT * FROM vw_inventario WHERE 1=1"
         params: dict = {}
         if produto_id is not None:
@@ -42,17 +36,17 @@ class EstoqueRepository:
             sql += " AND lote_id = :lote_id"
             params["lote_id"] = lote_id
         sql += " ORDER BY produto, data_validade, lote_id"
-        return db.session.execute(text(sql), params).mappings().all()
+        return paginar_sql(sql, params, paginacao)
 
     def listar_movimentacoes(
         self,
-        limite: int = 100,
+        paginacao: PaginacaoQuery,
         lote_id: Optional[int] = None,
         usuario_id: Optional[int] = None,
         tipo: Optional[str] = None,
     ):
         sql = "SELECT * FROM movimentacao_estoque WHERE 1=1"
-        params: dict = {"limite": limite}
+        params: dict = {}
         if lote_id is not None:
             sql += " AND lote_id = :lote_id"
             params["lote_id"] = lote_id
@@ -62,8 +56,8 @@ class EstoqueRepository:
         if tipo is not None:
             sql += " AND tipo = :tipo"
             params["tipo"] = tipo
-        sql += " ORDER BY id DESC LIMIT :limite"
-        return db.session.execute(text(sql), params).mappings().all()
+        sql += " ORDER BY id DESC"
+        return paginar_sql(sql, params, paginacao)
 
     def obter_movimentacao(self, mov_id: int) -> Optional[MovimentacaoEstoque]:
         return db.session.get(MovimentacaoEstoque, mov_id)
@@ -93,12 +87,12 @@ class EstoqueRepository:
 
     def _aplicar_saldo(self, *, tipo, lote_origem: Lote, lote_destino: Optional[Lote],
                         quantidade, quantidade_destino) -> None:
-        if tipo in _TIPOS_SOMAM_NA_ORIGEM:
+        if tipo in Constantes.TIPOS_SOMAM_NA_ORIGEM:
             lote_origem.quantidade += quantidade
-        elif tipo in _TIPOS_SUBTRAEM_DA_ORIGEM:
+        elif tipo in Constantes.TIPOS_SUBTRAEM_DA_ORIGEM:
             lote_origem.quantidade -= quantidade
 
-        if tipo in _TIPOS_COM_DESTINO:
+        if tipo in Constantes.TIPOS_COM_DESTINO:
             lote_destino.quantidade += quantidade_destino if quantidade_destino is not None else quantidade
 
     def transformacao_cadastrada(self, produto_origem_id: int, produto_destino_id: int) -> bool:
@@ -106,8 +100,10 @@ class EstoqueRepository:
 
     # -- localização -----------------------------------------------------------
 
-    def listar_localizacoes(self) -> list[Localizacao]:
-        return db.session.query(Localizacao).order_by(Localizacao.nome).all()
+    def listar_localizacoes(self, paginacao: PaginacaoQuery):
+        return paginar(
+            db.select(Localizacao).order_by(Localizacao.nome, Localizacao.id), paginacao
+        )
 
     def obter_localizacao(self, loc_id: int) -> Optional[Localizacao]:
         return db.session.get(Localizacao, loc_id)
@@ -115,7 +111,7 @@ class EstoqueRepository:
     def inserir_localizacao(self, *, nome, tipo, parent_id, foto_url) -> Localizacao:
         localizacao = Localizacao(nome=nome, tipo=tipo, parent_id=parent_id, foto_url=foto_url)
         db.session.add(localizacao)
-        db.session.flush()
+        db.session.commit()
         return localizacao
 
     def atualizar_localizacao(self, loc_id: int, campos: dict) -> None:
@@ -141,10 +137,30 @@ class EstoqueRepository:
 
     # -- lote --------------------------------------------------------------------
 
-    def listar_lotes(self, produto_id: Optional[int] = None, localizacao_id: Optional[int] = None):
-        sql = """SELECT l.*, p.nome AS produto, loc.nome AS localizacao FROM lote l
-                 JOIN produto p ON p.id = l.produto_id
-                 JOIN localizacao loc ON loc.id = l.localizacao_id WHERE 1=1"""
+    def listar_lotes(
+        self,
+        paginacao: PaginacaoQuery,
+        produto_id: Optional[int] = None,
+        localizacao_id: Optional[int] = None,
+    ):
+        sql = """SELECT l.*, p.nome AS produto, loc.nome AS localizacao,
+                        COALESCE(i.total, 0) AS itens_total,
+                        COALESCE(i.disponiveis, 0) AS itens_disponiveis,
+                        COALESCE(i.reservados, 0) AS itens_reservados,
+                        COALESCE(i.em_uso, 0) AS itens_em_uso,
+                        COALESCE(i.consumidos, 0) AS itens_consumidos
+                   FROM lote l
+                   JOIN produto p ON p.id = l.produto_id
+                   JOIN localizacao loc ON loc.id = l.localizacao_id
+                   LEFT JOIN (
+                        SELECT lote_id, COUNT(*) AS total,
+                               SUM(CASE WHEN status = 'DISPONIVEL' THEN 1 ELSE 0 END) AS disponiveis,
+                               SUM(CASE WHEN status = 'RESERVADA' THEN 1 ELSE 0 END) AS reservados,
+                               SUM(CASE WHEN status = 'EM_USO' THEN 1 ELSE 0 END) AS em_uso,
+                               SUM(CASE WHEN status = 'CONSUMIDA' THEN 1 ELSE 0 END) AS consumidos
+                          FROM item_lote GROUP BY lote_id
+                   ) i ON i.lote_id = l.id
+                  WHERE 1=1"""
         params: dict = {}
         if produto_id is not None:
             sql += " AND l.produto_id = :produto_id"
@@ -153,13 +169,14 @@ class EstoqueRepository:
             sql += " AND l.localizacao_id = :localizacao_id"
             params["localizacao_id"] = localizacao_id
         sql += " ORDER BY l.data_validade IS NULL, l.data_validade, l.id"
-        return db.session.execute(text(sql), params).mappings().all()
+        return paginar_sql(sql, params, paginacao)
 
     def obter_lote(self, lote_id: int, para_atualizacao: bool = False) -> Optional[Lote]:
         return db.session.get(Lote, lote_id, with_for_update=para_atualizacao)
 
     def inserir_lote(
-        self, *, produto_id, localizacao_id, data_producao, data_validade, custo_unitario
+        self, *, produto_id, localizacao_id, data_producao, data_validade, custo_unitario,
+        fornecedor=None, nota_fiscal=None,
     ) -> Lote:
         lote = Lote(
             produto_id=produto_id,
@@ -168,6 +185,8 @@ class EstoqueRepository:
             data_producao=data_producao,
             data_validade=data_validade,
             custo_unitario=custo_unitario,
+            fornecedor=fornecedor,
+            nota_fiscal=nota_fiscal,
         )
         db.session.add(lote)
         db.session.flush()
@@ -188,6 +207,74 @@ class EstoqueRepository:
             ),
             {"produto_id": produto_id, "hoje": date.today().isoformat()},
         ).mappings().all()
+
+    # -- itens do lote -----------------------------------------------------------
+
+    def listar_itens(self, paginacao: PaginacaoQuery, lote_id: int, status: Optional[str] = None):
+        consulta = db.select(ItemLote).where(ItemLote.lote_id == lote_id)
+        if status is not None:
+            consulta = consulta.where(ItemLote.status == status)
+        return paginar(consulta.order_by(ItemLote.lote_origem_id, ItemLote.sequencia), paginacao)
+
+    def obter_item(self, item_id: int, para_atualizacao: bool = False) -> Optional[ItemLote]:
+        return db.session.get(ItemLote, item_id, with_for_update=para_atualizacao)
+
+    def lote_tem_itens(self, lote_id: int) -> bool:
+        return db.session.execute(
+            db.select(ItemLote.id).where(ItemLote.lote_id == lote_id).limit(1)
+        ).first() is not None
+
+    def itens_por_ids(self, item_ids: list[int]) -> list[ItemLote]:
+        return list(db.session.execute(
+            db.select(ItemLote).where(ItemLote.id.in_(item_ids))
+            .order_by(ItemLote.id).with_for_update()
+        ).scalars())
+
+    def itens_fefo(self, lote_id: int) -> list[ItemLote]:
+        """Itens que podem ser usados, na ordem em que devem sair do estoque."""
+        consulta = (
+            db.select(ItemLote)
+            .where(ItemLote.lote_id == lote_id)
+            .where(ItemLote.status.in_(Constantes.STATUS_ITEM_LIVRES))
+            .order_by(
+                ItemLote.status != "EM_USO",
+                ItemLote.data_validade.is_(None),
+                ItemLote.data_validade,
+                ItemLote.lote_origem_id,
+                ItemLote.sequencia,
+            )
+            .with_for_update()
+        )
+        return list(db.session.execute(consulta).scalars())
+
+    def itens_ativos(self, lote_id: int) -> list[ItemLote]:
+        """Itens que ainda contam no saldo do lote."""
+        consulta = (
+            db.select(ItemLote)
+            .where(ItemLote.lote_id == lote_id)
+            .where(ItemLote.status.in_(Constantes.STATUS_ITEM_ATIVOS))
+        )
+        return list(db.session.execute(consulta).scalars())
+
+    def proxima_sequencia(self, lote_origem_id: int) -> int:
+        maior = db.session.execute(
+            db.select(db.func.max(ItemLote.sequencia))
+            .where(ItemLote.lote_origem_id == lote_origem_id)
+        ).scalar()
+        return (maior or 0) + 1
+
+    def inserir_itens(self, itens: list[ItemLote]) -> list[ItemLote]:
+        db.session.add_all(itens)
+        db.session.flush()
+        return itens
+
+    def vincular_item(self, movimentacao_id: int, item_id: int, quantidade: float) -> None:
+        """Registra que a movimentação usou `quantidade` do item."""
+        vinculo = MovimentacaoItem(
+            movimentacao_id=movimentacao_id, item_id=item_id, quantidade=quantidade
+        )
+        db.session.add(vinculo)
+        db.session.flush()
 
     # -- entidades de outras features, lidas só para validação cruzada --------
 

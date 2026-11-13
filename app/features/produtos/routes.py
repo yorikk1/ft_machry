@@ -1,9 +1,10 @@
 from flask import Blueprint
 
-from app.utils.parsing import entrada
+from app.utils.paginacao import PaginacaoQuery, resposta_paginada
+from app.utils.parsing import consulta, entrada
 
 from .repository import ProdutoRepository
-from .schemas import ProdutoCreate, ProdutoOut, ProdutoUpdate
+from .schemas import ProdutoCreate, ProdutoLoteCreate, ProdutoOut, ProdutoUpdate
 from .services import ProdutoService
 
 bp = Blueprint("produtos", __name__)
@@ -19,7 +20,7 @@ def _saida(produto):
 
 @bp.get("")
 def listar():
-    return [_saida(produto) for produto in get_service().listar()]
+    return resposta_paginada(get_service().listar(consulta(PaginacaoQuery)), ProdutoOut)
 
 
 @bp.get("/<int:produto_id>")
@@ -31,6 +32,16 @@ def detalhar(produto_id: int):
 def criar():
     produto = get_service().criar(entrada(ProdutoCreate))
     return _saida(produto), 201
+
+
+@bp.post("/lote")
+def criar_lote():
+    produtos, ignorados = get_service().criar_lote(entrada(ProdutoLoteCreate))
+    return {
+        "items": [_saida(produto) for produto in produtos],
+        "total": len(produtos),
+        "ignorados": ignorados,
+    }, 201
 
 
 @bp.put("/<int:produto_id>")
